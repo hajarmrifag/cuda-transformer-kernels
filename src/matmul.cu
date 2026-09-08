@@ -177,7 +177,7 @@ __global__ void matmul_register_tiled_kernel(
     std::size_t K,
     std::size_t N
 ) {
-    __shared__ float tile_A[REGISTER_BLOCK_TILE][REGISTER_K_TILE];
+    __shared__ float tile_A[REGISTER_BLOCK_TILE][REGISTER_K_TILE + 1];
     __shared__ float tile_B[REGISTER_K_TILE][REGISTER_BLOCK_TILE];
 
     const int tx = threadIdx.x;
