@@ -148,6 +148,30 @@ double calculate_gflops(
     return operations / seconds / 1e9;
 }
 
+bool run_and_check(
+    MatmulFunction function,
+    const std::vector<float>& reference,
+    std::vector<float>& result,
+    const float* d_A,
+    const float* d_B,
+    float* d_C,
+    std::size_t bytes,
+    std::size_t N
+) {
+    function(d_A, d_B, d_C, N, N, N);
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(
+        result.data(),
+        d_C,
+        bytes,
+        cudaMemcpyDeviceToHost
+    ));
+
+    return matrices_close(reference, result);
+}
+
 int main() {
     constexpr int runs = 20;
 
@@ -161,10 +185,9 @@ int main() {
     std::cout << std::fixed << std::setprecision(3);
 
     std::cout
-        << "Size\tNaive ms\tTiled ms\tNaive GFLOPS\t"
-        << "Tiled GFLOPS\tSpeedup\tCorrect\n"
-        << "-------------------------------------------------------------"
-        << "-------------------\n";
+        << "Size\tNaive GFLOPS\tTiled GFLOPS\t"
+        << "Register GFLOPS\tReg/Tiled\tCorrect\n"
+        << "---------------------------------------------------------------\n";
 
     for (const auto N : sizes) {
         const auto A = random_matrix(N, N, 42);
@@ -173,8 +196,7 @@ int main() {
         const auto reference =
             matmul_cpu(A, B, N, N, N);
 
-        std::vector<float> naive_result(N * N, 0.0f);
-        std::vector<float> tiled_result(N * N, 0.0f);
+        std::vector<float> result(N * N, 0.0f);
 
         float* d_A = nullptr;
         float* d_B = nullptr;
@@ -201,6 +223,42 @@ int main() {
             cudaMemcpyHostToDevice
         ));
 
+        const bool naive_correct =
+            run_and_check(
+                matmul_cuda_naive,
+                reference,
+                result,
+                d_A,
+                d_B,
+                d_C,
+                bytes,
+                N
+            );
+
+        const bool tiled_correct =
+            run_and_check(
+                matmul_cuda_tiled,
+                reference,
+                result,
+                d_A,
+                d_B,
+                d_C,
+                bytes,
+                N
+            );
+
+        const bool register_correct =
+            run_and_check(
+                matmul_cuda_register_tiled,
+                reference,
+                result,
+                d_A,
+                d_B,
+                d_C,
+                bytes,
+                N
+            );
+
         const float naive_ms =
             benchmark_kernel(
                 matmul_cuda_naive,
@@ -210,16 +268,6 @@ int main() {
                 N,
                 runs
             );
-
-        CUDA_CHECK(cudaMemcpy(
-            naive_result.data(),
-            d_C,
-            bytes,
-            cudaMemcpyDeviceToHost
-        ));
-
-        const bool naive_correct =
-            matrices_close(reference, naive_result);
 
         const float tiled_ms =
             benchmark_kernel(
@@ -231,15 +279,15 @@ int main() {
                 runs
             );
 
-        CUDA_CHECK(cudaMemcpy(
-            tiled_result.data(),
-            d_C,
-            bytes,
-            cudaMemcpyDeviceToHost
-        ));
-
-        const bool tiled_correct =
-            matrices_close(reference, tiled_result);
+        const float register_ms =
+            benchmark_kernel(
+                matmul_cuda_register_tiled,
+                d_A,
+                d_B,
+                d_C,
+                N,
+                runs
+            );
 
         const double naive_gflops =
             calculate_gflops(N, naive_ms);
@@ -247,35 +295,37 @@ int main() {
         const double tiled_gflops =
             calculate_gflops(N, tiled_ms);
 
-        const double speedup =
-            static_cast<double>(naive_ms) /
-            static_cast<double>(tiled_ms);
+        const double register_gflops =
+            calculate_gflops(N, register_ms);
+
+        const double register_vs_tiled =
+            static_cast<double>(tiled_ms) /
+            static_cast<double>(register_ms);
+
+        const bool correct =
+            naive_correct &&
+            tiled_correct &&
+            register_correct;
 
         std::cout
             << N << "x" << N
-            << '\t'
-            << naive_ms
-            << '\t'
-            << tiled_ms
             << '\t'
             << naive_gflops
             << '\t'
             << tiled_gflops
             << '\t'
-            << speedup << "x"
+            << register_gflops
             << '\t'
-            << (
-                naive_correct && tiled_correct
-                    ? "PASS"
-                    : "FAIL"
-            )
+            << register_vs_tiled << "x"
+            << '\t'
+            << (correct ? "PASS" : "FAIL")
             << '\n';
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
         CUDA_CHECK(cudaFree(d_C));
 
-        if (!naive_correct || !tiled_correct) {
+        if (!correct) {
             return 1;
         }
     }

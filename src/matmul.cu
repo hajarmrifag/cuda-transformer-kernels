@@ -164,3 +164,191 @@ void matmul_cuda_tiled(
 
     CUDA_CHECK(cudaGetLastError());
 }
+
+constexpr int REGISTER_BLOCK_TILE = 32;
+constexpr int REGISTER_K_TILE = 16;
+constexpr int THREAD_TILE = 2;
+
+__global__ void matmul_register_tiled_kernel(
+    const float* A,
+    const float* B,
+    float* C,
+    std::size_t M,
+    std::size_t K,
+    std::size_t N
+) {
+    __shared__ float tile_A[REGISTER_BLOCK_TILE][REGISTER_K_TILE];
+    __shared__ float tile_B[REGISTER_K_TILE][REGISTER_BLOCK_TILE];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+
+    const int linear_thread =
+        ty * blockDim.x + tx;
+
+    const std::size_t block_row =
+        blockIdx.y * REGISTER_BLOCK_TILE;
+
+    const std::size_t block_col =
+        blockIdx.x * REGISTER_BLOCK_TILE;
+
+    const std::size_t row0 =
+        block_row + ty * THREAD_TILE;
+
+    const std::size_t row1 =
+        row0 + 1;
+
+    const std::size_t col0 =
+        block_col + tx * THREAD_TILE;
+
+    const std::size_t col1 =
+        col0 + 1;
+
+    float c00 = 0.0f;
+    float c01 = 0.0f;
+    float c10 = 0.0f;
+    float c11 = 0.0f;
+
+    const std::size_t num_tiles =
+        (K + REGISTER_K_TILE - 1) /
+        REGISTER_K_TILE;
+
+    for (
+        std::size_t tile = 0;
+        tile < num_tiles;
+        ++tile
+    ) {
+        const std::size_t k_base =
+            tile * REGISTER_K_TILE;
+
+        // 256 threads cooperatively load
+        // 512 A values and 512 B values.
+        for (int load = 0; load < 2; ++load) {
+            const int index =
+                linear_thread + load * 256;
+
+            const int a_row =
+                index / REGISTER_K_TILE;
+
+            const int a_col =
+                index % REGISTER_K_TILE;
+
+            const std::size_t global_a_row =
+                block_row + a_row;
+
+            const std::size_t global_a_col =
+                k_base + a_col;
+
+            if (
+                global_a_row < M &&
+                global_a_col < K
+            ) {
+                tile_A[a_row][a_col] =
+                    A[
+                        global_a_row * K +
+                        global_a_col
+                    ];
+            } else {
+                tile_A[a_row][a_col] = 0.0f;
+            }
+
+            const int b_row =
+                index / REGISTER_BLOCK_TILE;
+
+            const int b_col =
+                index % REGISTER_BLOCK_TILE;
+
+            const std::size_t global_b_row =
+                k_base + b_row;
+
+            const std::size_t global_b_col =
+                block_col + b_col;
+
+            if (
+                global_b_row < K &&
+                global_b_col < N
+            ) {
+                tile_B[b_row][b_col] =
+                    B[
+                        global_b_row * N +
+                        global_b_col
+                    ];
+            } else {
+                tile_B[b_row][b_col] = 0.0f;
+            }
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < REGISTER_K_TILE; ++k) {
+            const float a0 =
+                tile_A[ty * THREAD_TILE][k];
+
+            const float a1 =
+                tile_A[ty * THREAD_TILE + 1][k];
+
+            const float b0 =
+                tile_B[k][tx * THREAD_TILE];
+
+            const float b1 =
+                tile_B[k][tx * THREAD_TILE + 1];
+
+            c00 += a0 * b0;
+            c01 += a0 * b1;
+            c10 += a1 * b0;
+            c11 += a1 * b1;
+        }
+
+        __syncthreads();
+    }
+
+    if (row0 < M && col0 < N) {
+        C[row0 * N + col0] = c00;
+    }
+
+    if (row0 < M && col1 < N) {
+        C[row0 * N + col1] = c01;
+    }
+
+    if (row1 < M && col0 < N) {
+        C[row1 * N + col0] = c10;
+    }
+
+    if (row1 < M && col1 < N) {
+        C[row1 * N + col1] = c11;
+    }
+}
+
+void matmul_cuda_register_tiled(
+    const float* A,
+    const float* B,
+    float* C,
+    std::size_t M,
+    std::size_t K,
+    std::size_t N
+) {
+    const dim3 block(16, 16);
+
+    const dim3 grid(
+        static_cast<unsigned int>(
+            (N + REGISTER_BLOCK_TILE - 1) /
+            REGISTER_BLOCK_TILE
+        ),
+        static_cast<unsigned int>(
+            (M + REGISTER_BLOCK_TILE - 1) /
+            REGISTER_BLOCK_TILE
+        )
+    );
+
+    matmul_register_tiled_kernel<<<grid, block>>>(
+        A,
+        B,
+        C,
+        M,
+        K,
+        N
+    );
+
+    CUDA_CHECK(cudaGetLastError());
+}
