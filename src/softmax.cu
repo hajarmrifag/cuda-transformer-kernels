@@ -1,6 +1,7 @@
 #include "softmax_cuda.h"
 
 #include <cuda_runtime.h>
+#include <math_constants.h>
 
 #include <cmath>
 #include <cstddef>
@@ -47,7 +48,7 @@ __global__ void softmax_naive_kernel(
     // -------------------------
 
     float local_max =
-        -std::numeric_limits<float>::infinity();
+        -CUDART_INF_F;
 
     for (
         std::size_t col = tid;
