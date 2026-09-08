@@ -24,6 +24,13 @@
         }                                                             \
     } while (0)
 
+using SoftmaxFunction = void (*)(
+    const float*,
+    float*,
+    std::size_t,
+    std::size_t
+);
+
 std::vector<float> random_input(
     std::size_t rows,
     std::size_t cols,
@@ -70,13 +77,14 @@ bool outputs_close(
 }
 
 float benchmark_softmax(
+    SoftmaxFunction function,
     const float* d_input,
     float* d_output,
     std::size_t rows,
     std::size_t cols,
     int runs
 ) {
-    softmax_cuda_naive(
+    function(
         d_input,
         d_output,
         rows,
@@ -97,7 +105,7 @@ float benchmark_softmax(
     for (int run = 0; run < runs; ++run) {
         CUDA_CHECK(cudaEventRecord(start));
 
-        softmax_cuda_naive(
+        function(
             d_input,
             d_output,
             rows,
@@ -126,6 +134,51 @@ float benchmark_softmax(
     return timings[timings.size() / 2];
 }
 
+bool run_and_check(
+    SoftmaxFunction function,
+    const std::vector<float>& reference,
+    std::vector<float>& output,
+    const float* d_input,
+    float* d_output,
+    std::size_t bytes,
+    std::size_t rows,
+    std::size_t cols
+) {
+    function(
+        d_input,
+        d_output,
+        rows,
+        cols
+    );
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(
+        output.data(),
+        d_output,
+        bytes,
+        cudaMemcpyDeviceToHost
+    ));
+
+    return outputs_close(reference, output);
+}
+
+double throughput_millions(
+    std::size_t rows,
+    std::size_t cols,
+    float milliseconds
+) {
+    return (
+        static_cast<double>(rows) *
+        static_cast<double>(cols)
+    ) /
+    (
+        static_cast<double>(milliseconds) /
+        1000.0
+    ) /
+    1e6;
+}
+
 int main() {
     constexpr std::size_t rows = 1024;
     constexpr int runs = 20;
@@ -141,8 +194,9 @@ int main() {
     std::cout << std::fixed << std::setprecision(3);
 
     std::cout
-        << "Shape\tMedian (ms)\tMElements/s\tCorrect\n"
-        << "------------------------------------------------\n";
+        << "Shape\tNaive MEl/s\tRegister MEl/s\t"
+        << "Speedup\tCorrect\n"
+        << "------------------------------------------------------------\n";
 
     for (const auto cols : widths) {
         const auto input =
@@ -172,8 +226,33 @@ int main() {
             cudaMemcpyHostToDevice
         ));
 
-        const float median_ms =
+        const bool naive_correct =
+            run_and_check(
+                softmax_cuda_naive,
+                reference,
+                output,
+                d_input,
+                d_output,
+                bytes,
+                rows,
+                cols
+            );
+
+        const bool register_correct =
+            run_and_check(
+                softmax_cuda_register_cached,
+                reference,
+                output,
+                d_input,
+                d_output,
+                bytes,
+                rows,
+                cols
+            );
+
+        const float naive_ms =
             benchmark_softmax(
+                softmax_cuda_naive,
                 d_input,
                 d_output,
                 rows,
@@ -181,33 +260,46 @@ int main() {
                 runs
             );
 
-        CUDA_CHECK(cudaMemcpy(
-            output.data(),
-            d_output,
-            bytes,
-            cudaMemcpyDeviceToHost
-        ));
+        const float register_ms =
+            benchmark_softmax(
+                softmax_cuda_register_cached,
+                d_input,
+                d_output,
+                rows,
+                cols,
+                runs
+            );
+
+        const double naive_throughput =
+            throughput_millions(
+                rows,
+                cols,
+                naive_ms
+            );
+
+        const double register_throughput =
+            throughput_millions(
+                rows,
+                cols,
+                register_ms
+            );
+
+        const double speedup =
+            static_cast<double>(naive_ms) /
+            static_cast<double>(register_ms);
 
         const bool correct =
-            outputs_close(reference, output);
-
-        const double million_elements_per_second =
-            (
-                static_cast<double>(rows) *
-                static_cast<double>(cols)
-            ) /
-            (
-                static_cast<double>(median_ms) /
-                1000.0
-            ) /
-            1e6;
+            naive_correct &&
+            register_correct;
 
         std::cout
             << rows << "x" << cols
             << '\t'
-            << median_ms
+            << naive_throughput
             << '\t'
-            << million_elements_per_second
+            << register_throughput
+            << '\t'
+            << speedup << "x"
             << '\t'
             << (correct ? "PASS" : "FAIL")
             << '\n';
