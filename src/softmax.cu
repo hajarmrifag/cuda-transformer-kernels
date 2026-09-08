@@ -284,3 +284,214 @@ void softmax_cuda_register_cached(
 
     CUDA_CHECK(cudaGetLastError());
 }
+
+__device__ __forceinline__ float warp_reduce_max(float value) {
+    constexpr unsigned int FULL_MASK = 0xffffffffu;
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        value = fmaxf(
+            value,
+            __shfl_down_sync(FULL_MASK, value, offset)
+        );
+    }
+
+    return value;
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float value) {
+    constexpr unsigned int FULL_MASK = 0xffffffffu;
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        value +=
+            __shfl_down_sync(FULL_MASK, value, offset);
+    }
+
+    return value;
+}
+
+__global__ void softmax_warp_shuffle_kernel(
+    const float* input,
+    float* output,
+    std::size_t rows,
+    std::size_t cols
+) {
+    const std::size_t row = blockIdx.x;
+
+    if (row >= rows) {
+        return;
+    }
+
+    const int tid = threadIdx.x;
+    const int lane = tid % warpSize;
+    const int warp_id = tid / warpSize;
+
+    constexpr int WARPS_PER_BLOCK =
+        SOFTMAX_BLOCK_SIZE / 32;
+
+    __shared__ float warp_results[WARPS_PER_BLOCK];
+
+    const std::size_t offset = row * cols;
+
+    float values[SOFTMAX_VALUES_PER_THREAD];
+    float exponentials[SOFTMAX_VALUES_PER_THREAD];
+
+    // -------------------------
+    // Load once into registers
+    // and find local maximum.
+    // -------------------------
+
+    float local_max = -CUDART_INF_F;
+
+    #pragma unroll
+    for (int i = 0; i < SOFTMAX_VALUES_PER_THREAD; ++i) {
+        const std::size_t col =
+            tid +
+            static_cast<std::size_t>(i) * blockDim.x;
+
+        float value = -CUDART_INF_F;
+
+        if (col < cols) {
+            value = input[offset + col];
+        }
+
+        values[i] = value;
+        local_max = fmaxf(local_max, value);
+    }
+
+    // -------------------------
+    // Warp-level max reduction
+    // -------------------------
+
+    local_max = warp_reduce_max(local_max);
+
+    if (lane == 0) {
+        warp_results[warp_id] = local_max;
+    }
+
+    __syncthreads();
+
+    // First warp reduces the
+    // per-warp maxima.
+    if (warp_id == 0) {
+        float block_max =
+            lane < WARPS_PER_BLOCK
+                ? warp_results[lane]
+                : -CUDART_INF_F;
+
+        block_max = warp_reduce_max(block_max);
+
+        if (lane == 0) {
+            warp_results[0] = block_max;
+        }
+    }
+
+    __syncthreads();
+
+    const float row_max = warp_results[0];
+
+    // -------------------------
+    // Exponentials stay in
+    // registers.
+    // -------------------------
+
+    float local_sum = 0.0f;
+
+    #pragma unroll
+    for (int i = 0; i < SOFTMAX_VALUES_PER_THREAD; ++i) {
+        const std::size_t col =
+            tid +
+            static_cast<std::size_t>(i) * blockDim.x;
+
+        float exp_value = 0.0f;
+
+        if (col < cols) {
+            exp_value =
+                expf(values[i] - row_max);
+        }
+
+        exponentials[i] = exp_value;
+        local_sum += exp_value;
+    }
+
+    // -------------------------
+    // Warp-level sum reduction
+    // -------------------------
+
+    local_sum = warp_reduce_sum(local_sum);
+
+    if (lane == 0) {
+        warp_results[warp_id] = local_sum;
+    }
+
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float block_sum =
+            lane < WARPS_PER_BLOCK
+                ? warp_results[lane]
+                : 0.0f;
+
+        block_sum = warp_reduce_sum(block_sum);
+
+        if (lane == 0) {
+            warp_results[0] = block_sum;
+        }
+    }
+
+    __syncthreads();
+
+    const float row_sum = warp_results[0];
+
+    // -------------------------
+    // Single final global write
+    // per value.
+    // -------------------------
+
+    #pragma unroll
+    for (int i = 0; i < SOFTMAX_VALUES_PER_THREAD; ++i) {
+        const std::size_t col =
+            tid +
+            static_cast<std::size_t>(i) * blockDim.x;
+
+        if (col < cols) {
+            output[offset + col] =
+                exponentials[i] / row_sum;
+        }
+    }
+}
+
+void softmax_cuda_warp_shuffle(
+    const float* input,
+    float* output,
+    std::size_t rows,
+    std::size_t cols
+) {
+    const std::size_t max_supported_cols =
+        SOFTMAX_BLOCK_SIZE *
+        SOFTMAX_VALUES_PER_THREAD;
+
+    if (cols > max_supported_cols) {
+        std::fprintf(
+            stderr,
+            "Warp-shuffle softmax supports at most %zu columns\n",
+            max_supported_cols
+        );
+
+        std::exit(EXIT_FAILURE);
+    }
+
+    const dim3 block(SOFTMAX_BLOCK_SIZE);
+
+    const dim3 grid(
+        static_cast<unsigned int>(rows)
+    );
+
+    softmax_warp_shuffle_kernel<<<grid, block>>>(
+        input,
+        output,
+        rows,
+        cols
+    );
+
+    CUDA_CHECK(cudaGetLastError());
+}

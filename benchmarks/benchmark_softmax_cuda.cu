@@ -195,8 +195,8 @@ int main() {
 
     std::cout
         << "Shape\tNaive MEl/s\tRegister MEl/s\t"
-        << "Speedup\tCorrect\n"
-        << "------------------------------------------------------------\n";
+        << "Shuffle MEl/s\tShuffle/Register\tCorrect\n"
+        << "--------------------------------------------------------------------------\n";
 
     for (const auto cols : widths) {
         const auto input =
@@ -250,6 +250,18 @@ int main() {
                 cols
             );
 
+        const bool shuffle_correct =
+            run_and_check(
+                softmax_cuda_warp_shuffle,
+                reference,
+                output,
+                d_input,
+                d_output,
+                bytes,
+                rows,
+                cols
+            );
+
         const float naive_ms =
             benchmark_softmax(
                 softmax_cuda_naive,
@@ -263,6 +275,16 @@ int main() {
         const float register_ms =
             benchmark_softmax(
                 softmax_cuda_register_cached,
+                d_input,
+                d_output,
+                rows,
+                cols,
+                runs
+            );
+
+        const float shuffle_ms =
+            benchmark_softmax(
+                softmax_cuda_warp_shuffle,
                 d_input,
                 d_output,
                 rows,
@@ -284,13 +306,21 @@ int main() {
                 register_ms
             );
 
-        const double speedup =
-            static_cast<double>(naive_ms) /
-            static_cast<double>(register_ms);
+        const double shuffle_throughput =
+            throughput_millions(
+                rows,
+                cols,
+                shuffle_ms
+            );
+
+        const double shuffle_vs_register =
+            static_cast<double>(register_ms) /
+            static_cast<double>(shuffle_ms);
 
         const bool correct =
             naive_correct &&
-            register_correct;
+            register_correct &&
+            shuffle_correct;
 
         std::cout
             << rows << "x" << cols
@@ -299,7 +329,9 @@ int main() {
             << '\t'
             << register_throughput
             << '\t'
-            << speedup << "x"
+            << shuffle_throughput
+            << '\t'
+            << shuffle_vs_register << "x"
             << '\t'
             << (correct ? "PASS" : "FAIL")
             << '\n';
