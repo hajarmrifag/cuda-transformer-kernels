@@ -24,6 +24,15 @@
         }                                                             \
     } while (0)
 
+using MatmulFunction = void (*)(
+    const float*,
+    const float*,
+    float*,
+    std::size_t,
+    std::size_t,
+    std::size_t
+);
+
 std::vector<float> random_matrix(
     std::size_t rows,
     std::size_t cols,
@@ -69,6 +78,76 @@ bool matrices_close(
     return true;
 }
 
+float benchmark_kernel(
+    MatmulFunction function,
+    const float* d_A,
+    const float* d_B,
+    float* d_C,
+    std::size_t N,
+    int runs
+) {
+    function(d_A, d_B, d_C, N, N, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start;
+    cudaEvent_t stop;
+
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    std::vector<float> timings;
+    timings.reserve(runs);
+
+    for (int run = 0; run < runs; ++run) {
+        CUDA_CHECK(cudaEventRecord(start));
+
+        function(
+            d_A,
+            d_B,
+            d_C,
+            N,
+            N,
+            N
+        );
+
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float milliseconds = 0.0f;
+
+        CUDA_CHECK(cudaEventElapsedTime(
+            &milliseconds,
+            start,
+            stop
+        ));
+
+        timings.push_back(milliseconds);
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    std::sort(timings.begin(), timings.end());
+
+    return timings[timings.size() / 2];
+}
+
+double calculate_gflops(
+    std::size_t N,
+    float milliseconds
+) {
+    const double operations =
+        2.0 *
+        static_cast<double>(N) *
+        static_cast<double>(N) *
+        static_cast<double>(N);
+
+    const double seconds =
+        static_cast<double>(milliseconds) / 1000.0;
+
+    return operations / seconds / 1e9;
+}
+
 int main() {
     constexpr int runs = 20;
 
@@ -82,8 +161,10 @@ int main() {
     std::cout << std::fixed << std::setprecision(3);
 
     std::cout
-        << "Size\tMedian (ms)\tGFLOPS\tCorrect\n"
-        << "------------------------------------------------\n";
+        << "Size\tNaive ms\tTiled ms\tNaive GFLOPS\t"
+        << "Tiled GFLOPS\tSpeedup\tCorrect\n"
+        << "-------------------------------------------------------------"
+        << "-------------------\n";
 
     for (const auto N : sizes) {
         const auto A = random_matrix(N, N, 42);
@@ -92,7 +173,8 @@ int main() {
         const auto reference =
             matmul_cpu(A, B, N, N, N);
 
-        std::vector<float> C(N * N, 0.0f);
+        std::vector<float> naive_result(N * N, 0.0f);
+        std::vector<float> tiled_result(N * N, 0.0f);
 
         float* d_A = nullptr;
         float* d_B = nullptr;
@@ -119,98 +201,81 @@ int main() {
             cudaMemcpyHostToDevice
         ));
 
-        // Warm-up
-        matmul_cuda_naive(
-            d_A,
-            d_B,
-            d_C,
-            N,
-            N,
-            N
-        );
-
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        cudaEvent_t start;
-        cudaEvent_t stop;
-
-        CUDA_CHECK(cudaEventCreate(&start));
-        CUDA_CHECK(cudaEventCreate(&stop));
-
-        std::vector<float> timings;
-        timings.reserve(runs);
-
-        for (int run = 0; run < runs; ++run) {
-            CUDA_CHECK(cudaEventRecord(start));
-
-            matmul_cuda_naive(
+        const float naive_ms =
+            benchmark_kernel(
+                matmul_cuda_naive,
                 d_A,
                 d_B,
                 d_C,
                 N,
-                N,
-                N
+                runs
             );
 
-            CUDA_CHECK(cudaEventRecord(stop));
-            CUDA_CHECK(cudaEventSynchronize(stop));
-
-            float milliseconds = 0.0f;
-
-            CUDA_CHECK(cudaEventElapsedTime(
-                &milliseconds,
-                start,
-                stop
-            ));
-
-            timings.push_back(milliseconds);
-        }
-
         CUDA_CHECK(cudaMemcpy(
-            C.data(),
+            naive_result.data(),
             d_C,
             bytes,
             cudaMemcpyDeviceToHost
         ));
 
-        const bool correct =
-            matrices_close(reference, C);
+        const bool naive_correct =
+            matrices_close(reference, naive_result);
 
-        std::sort(timings.begin(), timings.end());
+        const float tiled_ms =
+            benchmark_kernel(
+                matmul_cuda_tiled,
+                d_A,
+                d_B,
+                d_C,
+                N,
+                runs
+            );
 
-        const float median_ms =
-            timings[timings.size() / 2];
+        CUDA_CHECK(cudaMemcpy(
+            tiled_result.data(),
+            d_C,
+            bytes,
+            cudaMemcpyDeviceToHost
+        ));
 
-        const double seconds =
-            static_cast<double>(median_ms) / 1000.0;
+        const bool tiled_correct =
+            matrices_close(reference, tiled_result);
 
-        const double operations =
-            2.0 *
-            static_cast<double>(N) *
-            static_cast<double>(N) *
-            static_cast<double>(N);
+        const double naive_gflops =
+            calculate_gflops(N, naive_ms);
 
-        const double gflops =
-            operations / seconds / 1e9;
+        const double tiled_gflops =
+            calculate_gflops(N, tiled_ms);
+
+        const double speedup =
+            static_cast<double>(naive_ms) /
+            static_cast<double>(tiled_ms);
 
         std::cout
             << N << "x" << N
             << '\t'
-            << median_ms
+            << naive_ms
             << '\t'
-            << gflops
+            << tiled_ms
             << '\t'
-            << (correct ? "PASS" : "FAIL")
+            << naive_gflops
+            << '\t'
+            << tiled_gflops
+            << '\t'
+            << speedup << "x"
+            << '\t'
+            << (
+                naive_correct && tiled_correct
+                    ? "PASS"
+                    : "FAIL"
+            )
             << '\n';
-
-        CUDA_CHECK(cudaEventDestroy(start));
-        CUDA_CHECK(cudaEventDestroy(stop));
 
         CUDA_CHECK(cudaFree(d_A));
         CUDA_CHECK(cudaFree(d_B));
         CUDA_CHECK(cudaFree(d_C));
 
-        if (!correct) {
+        if (!naive_correct || !tiled_correct) {
             return 1;
         }
     }
