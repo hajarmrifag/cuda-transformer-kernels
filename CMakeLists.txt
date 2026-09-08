@@ -38,6 +38,8 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
     enable_language(CUDA)
 
+    find_package(CUDAToolkit REQUIRED)
+
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
@@ -69,6 +71,7 @@ if(CMAKE_CUDA_COMPILER)
         PRIVATE
         matmul_cpu
         matmul_cuda
+        CUDA::cublas
     )
 
 else()

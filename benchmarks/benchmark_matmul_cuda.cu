@@ -2,6 +2,7 @@
 #include "matmul_cuda.h"
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,19 @@
                 << "CUDA error at "                                   \
                 << __FILE__ << ":" << __LINE__ << ": "                \
                 << cudaGetErrorString(error) << '\n';                  \
+            std::exit(EXIT_FAILURE);                                  \
+        }                                                             \
+    } while (0)
+
+#define CUBLAS_CHECK(call)                                            \
+    do {                                                              \
+        cublasStatus_t status = (call);                               \
+        if (status != CUBLAS_STATUS_SUCCESS) {                        \
+            std::cerr                                                 \
+                << "cuBLAS error at "                                 \
+                << __FILE__ << ":" << __LINE__                        \
+                << ", status=" << static_cast<int>(status)            \
+                << '\n';                                              \
             std::exit(EXIT_FAILURE);                                  \
         }                                                             \
     } while (0)
@@ -132,6 +146,90 @@ float benchmark_kernel(
     return timings[timings.size() / 2];
 }
 
+float benchmark_cublas(
+    cublasHandle_t handle,
+    const float* d_A,
+    const float* d_B,
+    float* d_C,
+    std::size_t N,
+    int runs
+) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    // Our matrices are row-major.
+    // cuBLAS expects column-major, so compute:
+    // C^T = B^T * A^T
+    CUBLAS_CHECK(cublasSgemm(
+        handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        static_cast<int>(N),
+        static_cast<int>(N),
+        static_cast<int>(N),
+        &alpha,
+        d_B,
+        static_cast<int>(N),
+        d_A,
+        static_cast<int>(N),
+        &beta,
+        d_C,
+        static_cast<int>(N)
+    ));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    cudaEvent_t start;
+    cudaEvent_t stop;
+
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    std::vector<float> timings;
+    timings.reserve(runs);
+
+    for (int run = 0; run < runs; ++run) {
+        CUDA_CHECK(cudaEventRecord(start));
+
+        CUBLAS_CHECK(cublasSgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            static_cast<int>(N),
+            static_cast<int>(N),
+            static_cast<int>(N),
+            &alpha,
+            d_B,
+            static_cast<int>(N),
+            d_A,
+            static_cast<int>(N),
+            &beta,
+            d_C,
+            static_cast<int>(N)
+        ));
+
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float milliseconds = 0.0f;
+
+        CUDA_CHECK(cudaEventElapsedTime(
+            &milliseconds,
+            start,
+            stop
+        ));
+
+        timings.push_back(milliseconds);
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    std::sort(timings.begin(), timings.end());
+
+    return timings[timings.size() / 2];
+}
+
 double calculate_gflops(
     std::size_t N,
     float milliseconds
@@ -172,6 +270,48 @@ bool run_and_check(
     return matrices_close(reference, result);
 }
 
+bool run_and_check_cublas(
+    cublasHandle_t handle,
+    const std::vector<float>& reference,
+    std::vector<float>& result,
+    const float* d_A,
+    const float* d_B,
+    float* d_C,
+    std::size_t bytes,
+    std::size_t N
+) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+
+    CUBLAS_CHECK(cublasSgemm(
+        handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        static_cast<int>(N),
+        static_cast<int>(N),
+        static_cast<int>(N),
+        &alpha,
+        d_B,
+        static_cast<int>(N),
+        d_A,
+        static_cast<int>(N),
+        &beta,
+        d_C,
+        static_cast<int>(N)
+    ));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(
+        result.data(),
+        d_C,
+        bytes,
+        cudaMemcpyDeviceToHost
+    ));
+
+    return matrices_close(reference, result);
+}
+
 int main() {
     constexpr int runs = 20;
 
@@ -182,12 +322,16 @@ int main() {
         1024
     };
 
+    cublasHandle_t handle;
+    CUBLAS_CHECK(cublasCreate(&handle));
+
     std::cout << std::fixed << std::setprecision(3);
 
     std::cout
         << "Size\tNaive GFLOPS\tTiled GFLOPS\t"
-        << "Register GFLOPS\tReg/Tiled\tCorrect\n"
-        << "---------------------------------------------------------------\n";
+        << "Register GFLOPS\tcuBLAS GFLOPS\t"
+        << "Register/cuBLAS\tCorrect\n"
+        << "--------------------------------------------------------------------------------\n";
 
     for (const auto N : sizes) {
         const auto A = random_matrix(N, N, 42);
@@ -259,6 +403,18 @@ int main() {
                 N
             );
 
+        const bool cublas_correct =
+            run_and_check_cublas(
+                handle,
+                reference,
+                result,
+                d_A,
+                d_B,
+                d_C,
+                bytes,
+                N
+            );
+
         const float naive_ms =
             benchmark_kernel(
                 matmul_cuda_naive,
@@ -289,6 +445,16 @@ int main() {
                 runs
             );
 
+        const float cublas_ms =
+            benchmark_cublas(
+                handle,
+                d_A,
+                d_B,
+                d_C,
+                N,
+                runs
+            );
+
         const double naive_gflops =
             calculate_gflops(N, naive_ms);
 
@@ -298,14 +464,17 @@ int main() {
         const double register_gflops =
             calculate_gflops(N, register_ms);
 
-        const double register_vs_tiled =
-            static_cast<double>(tiled_ms) /
-            static_cast<double>(register_ms);
+        const double cublas_gflops =
+            calculate_gflops(N, cublas_ms);
+
+        const double register_vs_cublas =
+            register_gflops / cublas_gflops;
 
         const bool correct =
             naive_correct &&
             tiled_correct &&
-            register_correct;
+            register_correct &&
+            cublas_correct;
 
         std::cout
             << N << "x" << N
@@ -316,7 +485,9 @@ int main() {
             << '\t'
             << register_gflops
             << '\t'
-            << register_vs_tiled << "x"
+            << cublas_gflops
+            << '\t'
+            << register_vs_cublas * 100.0 << "%"
             << '\t'
             << (correct ? "PASS" : "FAIL")
             << '\n';
@@ -326,9 +497,12 @@ int main() {
         CUDA_CHECK(cudaFree(d_C));
 
         if (!correct) {
+            CUBLAS_CHECK(cublasDestroy(handle));
             return 1;
         }
     }
+
+    CUBLAS_CHECK(cublasDestroy(handle));
 
     return 0;
 }
