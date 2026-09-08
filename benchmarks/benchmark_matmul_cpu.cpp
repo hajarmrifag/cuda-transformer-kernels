@@ -1,51 +1,112 @@
 #include "matmul.h"
 
+#include <algorithm>
 #include <chrono>
-#include <cmath>
+#include <cstddef>
+#include <iomanip>
 #include <iostream>
+#include <random>
 #include <vector>
 
-int main() {
-    constexpr std::size_t M = 2;
-    constexpr std::size_t K = 3;
-    constexpr std::size_t N = 2;
+std::vector<float> random_matrix(
+    std::size_t rows,
+    std::size_t cols,
+    unsigned int seed
+) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
-    const std::vector<float> A = {
-        1.0f, 2.0f, 3.0f,
-        4.0f, 5.0f, 6.0f
-    };
+    std::vector<float> matrix(rows * cols);
 
-    const std::vector<float> B = {
-        7.0f,  8.0f,
-        9.0f, 10.0f,
-        11.0f, 12.0f
-    };
-
-    const std::vector<float> expected = {
-        58.0f, 64.0f,
-        139.0f, 154.0f
-    };
-
-    const auto start = std::chrono::high_resolution_clock::now();
-
-    const auto C = matmul_cpu(A, B, M, K, N);
-
-    const auto end = std::chrono::high_resolution_clock::now();
-
-    for (std::size_t i = 0; i < C.size(); ++i) {
-        if (std::fabs(C[i] - expected[i]) > 1e-5f) {
-            std::cerr << "FAILED: incorrect result at index "
-                      << i << '\n';
-            return 1;
-        }
+    for (auto& value : matrix) {
+        value = dist(rng);
     }
 
-    const std::chrono::duration<double, std::micro> elapsed = end - start;
+    return matrix;
+}
 
-    std::cout << "CPU matrix multiplication: PASS\n";
-    std::cout << "Execution time: "
-              << elapsed.count()
-              << " microseconds\n";
+int main() {
+    constexpr int runs = 7;
+
+    const std::vector<std::size_t> sizes = {
+        128,
+        256,
+        512,
+        1024
+    };
+
+    std::cout << std::fixed << std::setprecision(3);
+
+    std::cout
+        << "Size\tMedian (ms)\tGFLOPS\n"
+        << "----------------------------------------\n";
+
+    for (const auto N : sizes) {
+        const auto A = random_matrix(N, N, 42);
+        const auto B = random_matrix(N, N, 1337);
+
+        // Warm-up run
+        auto warmup = matmul_cpu(A, B, N, N, N);
+
+        if (warmup.empty()) {
+            std::cerr << "Warm-up failed\n";
+            return 1;
+        }
+
+        std::vector<double> timings;
+        timings.reserve(runs);
+
+        for (int run = 0; run < runs; ++run) {
+            const auto start =
+                std::chrono::high_resolution_clock::now();
+
+            const auto C = matmul_cpu(
+                A,
+                B,
+                N,
+                N,
+                N
+            );
+
+            const auto end =
+                std::chrono::high_resolution_clock::now();
+
+            if (C.empty()) {
+                std::cerr << "Unexpected empty result\n";
+                return 1;
+            }
+
+            const std::chrono::duration<double, std::milli>
+                elapsed = end - start;
+
+            timings.push_back(elapsed.count());
+        }
+
+        std::sort(timings.begin(), timings.end());
+
+        const double median_ms =
+            timings[timings.size() / 2];
+
+        const double seconds =
+            median_ms / 1000.0;
+
+        const double operations =
+            2.0 *
+            static_cast<double>(N) *
+            static_cast<double>(N) *
+            static_cast<double>(N);
+
+        const double gflops =
+            operations / seconds / 1e9;
+
+        std::cout
+            << N << "x" << N
+            << '\t'
+            << median_ms
+            << '\t'
+            << gflops
+            << '\n';
+    }
 
     return 0;
 }
