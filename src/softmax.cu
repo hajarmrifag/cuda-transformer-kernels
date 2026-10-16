@@ -1,3 +1,4 @@
+#include "validation.h"
 #include "softmax_cuda.h"
 
 #include <cuda_runtime.h>
@@ -138,6 +139,8 @@ void softmax_cuda_naive(
     std::size_t rows,
     std::size_t cols
 ) {
+    validation::softmax_shape(rows, cols, false);
+    if (!input || !output) throw std::invalid_argument("null device pointer");
     const dim3 block(SOFTMAX_BLOCK_SIZE);
     const dim3 grid(
         static_cast<unsigned int>(rows)
@@ -269,6 +272,8 @@ void softmax_cuda_register_cached(
     std::size_t rows,
     std::size_t cols
 ) {
+    validation::softmax_shape(rows, cols, true);
+    if (!input || !output) throw std::invalid_argument("null device pointer");
     const dim3 block(SOFTMAX_BLOCK_SIZE);
 
     const dim3 grid(
@@ -466,20 +471,8 @@ void softmax_cuda_warp_shuffle(
     std::size_t rows,
     std::size_t cols
 ) {
-    const std::size_t max_supported_cols =
-        SOFTMAX_BLOCK_SIZE *
-        SOFTMAX_VALUES_PER_THREAD;
-
-    if (cols > max_supported_cols) {
-        std::fprintf(
-            stderr,
-            "Warp-shuffle softmax supports at most %zu columns\n",
-            max_supported_cols
-        );
-
-        std::exit(EXIT_FAILURE);
-    }
-
+    validation::softmax_shape(rows, cols, true);
+    if (!input || !output) throw std::invalid_argument("null device pointer");
     const dim3 block(SOFTMAX_BLOCK_SIZE);
 
     const dim3 grid(

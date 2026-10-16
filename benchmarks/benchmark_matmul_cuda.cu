@@ -1,3 +1,4 @@
+#include "validation.h"
 #include "matmul.h"
 #include "matmul_cuda.h"
 
@@ -64,32 +65,10 @@ std::vector<float> random_matrix(
     return matrix;
 }
 
-bool matrices_close(
-    const std::vector<float>& reference,
-    const std::vector<float>& candidate,
-    float tolerance = 1e-3f
-) {
-    if (reference.size() != candidate.size()) {
-        return false;
-    }
-
-    for (std::size_t i = 0; i < reference.size(); ++i) {
-        const float difference =
-            std::fabs(reference[i] - candidate[i]);
-
-        if (difference > tolerance) {
-            std::cerr
-                << "Mismatch at index " << i
-                << ": CPU=" << reference[i]
-                << ", GPU=" << candidate[i]
-                << ", diff=" << difference
-                << '\n';
-
-            return false;
-        }
-    }
-
-    return true;
+bool matrices_close(const std::vector<float>& reference, const std::vector<float>& candidate,
+                  float tolerance = 1e-3f) {
+    // Preserve the historical absolute tolerance while rejecting nonfinite values.
+    return validation::close(reference, candidate, tolerance);
 }
 
 float benchmark_kernel(

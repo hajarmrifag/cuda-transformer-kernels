@@ -2,9 +2,17 @@
 
 CUDA C++ implementations and performance analysis of two core transformer operations: **matrix multiplication (GEMM)** and **row-wise Softmax**.
 
-The project focuses on iterative GPU optimization. Each implementation was validated for correctness, benchmarked for throughput, and profiled with NVIDIA Nsight Compute to identify bottlenecks and guide subsequent changes.
+The project focuses on iterative GPU optimization. The repository records CPU-reference comparisons, throughput benchmarks and NVIDIA Nsight Compute observations. Historical checks had a NaN-comparison weakness, now corrected; raw original profiler reports are not retained, so those observations are not independently reproducible from the summaries alone.
 
 Benchmarks were run on an **NVIDIA Tesla T4, compute capability 7.5, with CUDA 12.8**.
+
+## Review the engineering evidence
+
+- [Kernel implementation](src/matmul.cu), [Softmax](src/softmax.cu), [historical measurements](results/).
+- [Validation contract, automated tests and verification limits](docs/validation.md).
+- [Benchmark boundaries and reproducibility](docs/benchmark-method.md).
+
+This is a learning/performance experiment, not a complete transformer implementation or trading system. The custom GEMM remains slower than cuBLAS. Results below are historical T4 measurements, not a fresh GPU run of the validation changes.
 
 ## Highlights
 

@@ -1,3 +1,4 @@
+#include "validation.h"
 #include "matmul.h"
 
 #include <stdexcept>
@@ -10,11 +11,12 @@ std::vector<float> matmul_cpu(
     std::size_t K,
     std::size_t N
 ) {
-    if (A.size() != M * K) {
+    validation::elements(M, N);
+    if (A.size() != validation::elements(M, K)) {
         throw std::invalid_argument("A has incorrect dimensions");
     }
 
-    if (B.size() != K * N) {
+    if (B.size() != validation::elements(K, N)) {
         throw std::invalid_argument("B has incorrect dimensions");
     }
 
