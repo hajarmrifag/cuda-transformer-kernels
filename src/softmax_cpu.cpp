@@ -1,3 +1,4 @@
+#include "validation.h"
 #include "softmax.h"
 
 #include <algorithm>
@@ -11,8 +12,12 @@ std::vector<float> softmax_cpu(
     std::size_t rows,
     std::size_t cols
 ) {
-    if (input.size() != rows * cols) {
+    if (input.size() != validation::elements(rows, cols)) {
         throw std::invalid_argument("Input has incorrect dimensions");
+    }
+
+    for (float value : input) {
+        if (!std::isfinite(value)) throw std::invalid_argument("finite input required");
     }
 
     std::vector<float> output(input.size());

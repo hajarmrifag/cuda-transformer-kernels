@@ -1,3 +1,4 @@
+#include "validation.h"
 #include "softmax.h"
 #include "softmax_cuda.h"
 
@@ -48,32 +49,10 @@ std::vector<float> random_input(
     return data;
 }
 
-bool outputs_close(
-    const std::vector<float>& reference,
-    const std::vector<float>& candidate,
-    float tolerance = 1e-4f
-) {
-    if (reference.size() != candidate.size()) {
-        return false;
-    }
-
-    for (std::size_t i = 0; i < reference.size(); ++i) {
-        const float diff =
-            std::fabs(reference[i] - candidate[i]);
-
-        if (diff > tolerance) {
-            std::cerr
-                << "Mismatch at index " << i
-                << ": CPU=" << reference[i]
-                << ", GPU=" << candidate[i]
-                << ", diff=" << diff
-                << '\n';
-
-            return false;
-        }
-    }
-
-    return true;
+bool outputs_close(const std::vector<float>& reference, const std::vector<float>& candidate,
+                  float tolerance = 1e-4f) {
+    // Preserve the historical absolute tolerance while rejecting nonfinite values.
+    return validation::close(reference, candidate, tolerance);
 }
 
 float benchmark_softmax(
