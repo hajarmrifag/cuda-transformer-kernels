@@ -6,7 +6,10 @@ FP32 matrix multiplication and row-wise Softmax in C++/CUDA, with CPU references
 
 [Kernel source](src/) · [Full results](results/) · [Optimization notes](docs/optimization.md) · [Benchmark protocol](docs/benchmark-method.md) · [Validation](docs/validation.md)
 
-![Recorded FP32 GEMM throughput at 1024 by 1024 on Tesla T4: naive 385.648, shared-memory 485.283, register-tiled and padded 1278.508, cuBLAS 5322.721 GFLOPS. Higher is better.](docs/img/gemm-comparison.svg)
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/img/gemm-comparison-mobile.svg">
+  <img src="docs/img/gemm-comparison.svg" alt="Recorded FP32 GEMM throughput at 1024 by 1024 on Tesla T4: naive 385.648, shared-memory 485.283, register-tiled and padded 1278.508, cuBLAS 5322.721 GFLOPS. Higher is better.">
+</picture>
 
 The custom kernel reaches **1.28 TFLOPS**, about **3.32× the naive implementation** and **24.0% of cuBLAS** in this workload. The library baseline stays visible to put the improvement in context.
 
